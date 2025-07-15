@@ -399,50 +399,44 @@ func charsetReader(charset string, input io.Reader) (io.Reader, error) {
 
 /******************** 业务逻辑函数 ********************/
 
-// checkAndProcessEmails 邮件处理主流程
+// CheckAndProcessEmails 邮件处理主流程
 // 参数:
 //   - mailService: 邮件服务实例
 //   - handler: 邮件处理器
 //   - logger: 日志记录器
 //
 // 返回: 处理过程中的错误
-func checkAndProcessEmails(mailService MailService, handler EmailHandler, logger *storage.Logger) error {
+func CheckAndProcessEmails(mailService MailService, logger *storage.Logger) (email *Email, err error) {
 	startTime := time.Now()
 	logger.Info("开始检查邮箱...")
 
 	// 建立连接
 	if err := mailService.Connect(); err != nil {
-		return fmt.Errorf("连接失败: %w", err)
+		return email, fmt.Errorf("连接失败: %w", err)
 	}
 	defer mailService.Disconnect() // 确保连接关闭
 
 	// 获取未读邮件
 	emails, err := mailService.FetchUnreadEmails()
 	if err != nil {
-		return fmt.Errorf("获取邮件失败: %w", err)
+		return email, fmt.Errorf("获取邮件失败: %w", err)
 	}
 
 	// 空结果处理
 	if len(emails) == 0 {
 		logger.Info("没有新邮件")
-		return err
+		return email, err
 	}
 
 	// 过滤目标邮件
 	targetEmail := filterLatestTargetEmail(emails, "兴效能")
 	if targetEmail == nil {
 		logger.Info("没有目标邮件")
-		return err
-	}
-
-	// 处理邮件
-	if err := handler.Handle(targetEmail); err != nil {
-		logger.Error(fmt.Sprintf("处理邮件失败(UID:%d): %v", targetEmail.UID, err))
-		return fmt.Errorf("处理失败: %w", err)
+		return email, err
 	}
 
 	logger.Info(fmt.Sprintf("处理完成，耗时: %v", time.Since(startTime)))
-	return nil
+	return targetEmail, nil
 }
 
 // filterLatestTargetEmail 过滤符合条件的最近邮件

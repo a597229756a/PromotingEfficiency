@@ -39,6 +39,7 @@ func TestNewEmailClient(t *testing.T) {
 	// 连接到邮箱
 	handler := NewXLSXAttachmentHandler(cfg.Email.TargetSubject, cfg.DataDir)
 
+	var dfw *DataFrameWrapper = &DataFrameWrapper{}
 	// 设置定时任务
 	c := cron.New()
 
@@ -50,9 +51,28 @@ func TestNewEmailClient(t *testing.T) {
 	err = c.AddFunc(cronSpec, func() {
 		logger.Info(fmt.Sprintf("开始定时检查(间隔: %v)...", cronSpec))
 
-		if err := checkAndProcessEmails(emailClient, handler, logger); err != nil {
+		t1 := time.Now()
+		// 查询email是否有更新
+		newEmail, err := CheckAndProcessEmails(emailClient, logger)
+		if err != nil {
 			logger.Error("检查处理邮件失败: " + err.Error()) // 使用Error级别记录错误
 		}
+
+		// 将附件另存为xlsx
+		go func() {
+			if err := handler.Handle(newEmail); err != nil {
+				logger.Error(fmt.Sprintf("处理邮件失败(UID:%d): %v", newEmail.UID, err))
+			}
+		}()
+
+		// 附件转dataframe错误
+		bytes := newEmail.Attachments[0].Content
+		if err := dfw.ReadXLSX(bytes, "进离港航班"); err != nil {
+			logger.Error(err.Error())
+		}
+		t2 := time.Now().Sub(t1)
+		fmt.Println(t2)
+
 	})
 
 	if err != nil {
