@@ -37,11 +37,6 @@ func TestNewEmailClient(t *testing.T) {
 		cfg.Email.Password)
 
 	// 连接到邮箱
-	monitorEmails(emailClient, logger, cfg)
-
-}
-
-func monitorEmails(client *EmailClient, logger *storage.Logger, cfg *config.Config) {
 	handler := NewXLSXAttachmentHandler(cfg.Email.TargetSubject, cfg.DataDir)
 
 	// 设置定时任务
@@ -52,10 +47,10 @@ func monitorEmails(client *EmailClient, logger *storage.Logger, cfg *config.Conf
 	cronSpec := fmt.Sprintf("@every %s", interval)
 
 	// 添加定时任务
-	err := c.AddFunc(cronSpec, func() {
+	err = c.AddFunc(cronSpec, func() {
 		logger.Info(fmt.Sprintf("开始定时检查(间隔: %v)...", cronSpec))
 
-		if err := checkAndProcessEmails(client, handler, logger); err != nil {
+		if err := checkAndProcessEmails(emailClient, handler, logger); err != nil {
 			logger.Error("检查处理邮件失败: " + err.Error()) // 使用Error级别记录错误
 		}
 	})
@@ -71,4 +66,5 @@ func monitorEmails(client *EmailClient, logger *storage.Logger, cfg *config.Conf
 
 	logger.Info(fmt.Sprintf("邮件监控服务已启动(检查间隔: %v)，按Ctrl+C退出", interval))
 	select {}
+
 }
