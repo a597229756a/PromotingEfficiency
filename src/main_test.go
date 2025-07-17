@@ -14,8 +14,13 @@ func TestStartWebUI(t *testing.T) {
 	// 初始化配置
 	jsonFolder := "config"
 	jsonFile := "config.json"
-	cfg := config.LoadConfig(jsonFolder, jsonFile)
-	fmt.Println(cfg)
+	dataJsonFile := "dataconfig.json"
+	cfg, dcfg, err := config.LoadConfig(jsonFolder, jsonFile, dataJsonFile)
+
+	if err != nil {
+		log.Fatal("Failed to initialize logger:", err)
+	}
+	fmt.Println(dcfg)
 
 	logger, err := storage.NewLogger("app.log")
 	if err != nil {

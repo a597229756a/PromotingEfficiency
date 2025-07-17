@@ -18,7 +18,17 @@ import (
 func main() {
 	jsonFolder := "./config"
 	jsonFile := "config.json"
-	cfg := config.LoadConfig(jsonFolder, jsonFile)
+	dataJsonFile := "dataconfig.json"
+	cfg, dcfg, err := config.LoadConfig(jsonFolder, jsonFile, dataJsonFile)
+
+	if err != nil {
+		log.Fatal("Failed to initialize logger:", err)
+	}
+	fmt.Println(dcfg)
+
+	if err != nil {
+		fmt.Println(err)
+	}
 
 	// 初始化日志系统
 	logger, err := storage.NewLogger("app.log")
@@ -56,7 +66,7 @@ func main() {
 
 		// 将附件另存为xlsx
 		go func() {
-			if err := handler.Handle(newEmail); err != nil {
+			if err := handler.Handle(newEmail, logger); err != nil {
 				logger.Error(fmt.Sprintf("处理邮件失败(UID:%d): %v", newEmail.UID, err))
 			}
 		}()
@@ -66,8 +76,8 @@ func main() {
 		if err := dfw.ReadXLSX(bytes, "进离港航班"); err != nil {
 			logger.Error(err.Error())
 		}
-		t2 := time.Now().Sub(t1)
-		fmt.Println(t2)
+		t2 := time.Since(t1)
+		logger.Info(fmt.Sprintf("数据处理时间：%v\n", t2))
 
 	})
 

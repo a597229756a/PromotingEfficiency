@@ -2,6 +2,7 @@
 package email
 
 import (
+	"PromotingEfficiency/src/storage"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,7 +44,7 @@ func (h *XLSXAttachmentHandler) markAsProcessed(uid uint32) {
 }
 
 // Handle 处理单个邮件
-func (h *XLSXAttachmentHandler) Handle(email *Email) error {
+func (h *XLSXAttachmentHandler) Handle(email *Email, logger *storage.Logger) error {
 	// 检查是否已处理过该邮件
 	if h.isProcessed(email.UID) {
 		return nil
@@ -51,13 +52,13 @@ func (h *XLSXAttachmentHandler) Handle(email *Email) error {
 
 	// 检查邮件主题是否包含目标关键词
 	if !strings.Contains(email.Subject, h.TargetSubject) {
-		fmt.Printf("跳过主题不匹配的邮件: %s\n", email.Subject)
+		logger.Info(fmt.Sprintf("跳过主题不匹配的邮件: %s", email.Subject))
 		return nil
 	}
 
 	// 打印邮件基本信息
-	fmt.Printf("\n处理邮件: %s\n发件人: %s\n日期: %s\n",
-		email.Subject, email.From, email.Date.Format("2006-01-02 15:04:05"))
+	logger.Info(fmt.Sprintf("处理邮件: %s发件人: %s日期: %s",
+		email.Subject, email.From, email.Date.Format("2006-01-02 15:04:05")))
 
 	// 确保保存目录存在
 	if err := os.MkdirAll(h.DataDir, 0755); err != nil {
@@ -69,7 +70,7 @@ func (h *XLSXAttachmentHandler) Handle(email *Email) error {
 	for _, attachment := range email.Attachments {
 		// 只处理XLSX文件
 		if filepath.Ext(attachment.Filename) == ".xlsx" {
-			fmt.Println("找到XLSX附件:", attachment.Filename)
+			logger.Info(fmt.Sprintf("找到XLSX附件:%v", attachment.Filename))
 
 			// 构建完整文件路径
 			filePath := filepath.Join(h.DataDir, attachment.Filename)
@@ -79,7 +80,7 @@ func (h *XLSXAttachmentHandler) Handle(email *Email) error {
 				return fmt.Errorf("保存附件失败: %v", err)
 			}
 
-			fmt.Printf("附件已保存到: %s\n", filePath)
+			logger.Info(fmt.Sprintf("附件已保存到: %s", filePath))
 			hasXLSX = true
 		}
 	}

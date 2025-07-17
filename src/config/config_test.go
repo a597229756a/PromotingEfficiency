@@ -8,7 +8,13 @@ import (
 func TestLoadConfig(t *testing.T) {
 	jsonFolder := ""
 	jsonFile := "config.json"
-	cfg := LoadConfig(jsonFolder, jsonFile)
-	fmt.Println(cfg)
+	dataJsonFile := "dataconfig.json"
+	cfg, dcfg, err := LoadConfig(jsonFolder, jsonFile, dataJsonFile)
+
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Println(cfg, dcfg)
 
 }

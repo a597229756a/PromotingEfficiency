@@ -16,8 +16,13 @@ func TestMain(m *testing.M) {
 
 	jsonFolder := "../config"
 	jsonFile := "config.json"
-	cfg := config.LoadConfig(jsonFolder, jsonFile)
-	fmt.Println(cfg)
+	dataJsonFile := "dataconfig.json"
+	cfg, dcfg, err := config.LoadConfig(jsonFolder, jsonFile, dataJsonFile)
+
+	if err != nil {
+		log.Fatal("Failed to initialize logger:", err)
+	}
+	fmt.Println(dcfg)
 
 	// 初始化logger记录器
 	logger, err := NewLogger(cfg.LogName)

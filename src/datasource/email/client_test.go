@@ -2,6 +2,7 @@ package email
 
 import (
 	"PromotingEfficiency/src/config"
+	"PromotingEfficiency/src/processor"
 	"PromotingEfficiency/src/storage"
 	"fmt"
 	"log"
@@ -14,7 +15,12 @@ import (
 func TestSendEmail(t *testing.T) {
 	jsonFolder := "../../config"
 	jsonFile := "config.json"
-	cfg := config.LoadConfig(jsonFolder, jsonFile)
+	dataJsonFile := "dataconfig.json"
+	cfg, dcfg, err := config.LoadConfig(jsonFolder, jsonFile, dataJsonFile)
+	if err != nil {
+		log.Fatal("Failed to initialize logger:", err)
+	}
+	fmt.Println(dcfg)
 
 	SendEmail(cfg)
 }
@@ -22,7 +28,12 @@ func TestSendEmail(t *testing.T) {
 func TestNewEmailClient(t *testing.T) {
 	jsonFolder := "../../config"
 	jsonFile := "config.json"
-	cfg := config.LoadConfig(jsonFolder, jsonFile)
+	dataJsonFile := "dataconfig.json"
+	cfg, dcfg, err := config.LoadConfig(jsonFolder, jsonFile, dataJsonFile)
+	if err != nil {
+		log.Fatal("Failed to initialize logger:", err)
+	}
+	fmt.Println(dcfg)
 
 	// 初始化日志系统
 	logger, err := storage.NewLogger("app.log")
@@ -56,23 +67,30 @@ func TestNewEmailClient(t *testing.T) {
 		newEmail, err := CheckAndProcessEmails(emailClient, logger)
 		if err != nil {
 			logger.Error("检查处理邮件失败: " + err.Error()) // 使用Error级别记录错误
-		}
+		} else {
 
-		// 将附件另存为xlsx
-		go func() {
-			if err := handler.Handle(newEmail); err != nil {
-				logger.Error(fmt.Sprintf("处理邮件失败(UID:%d): %v", newEmail.UID, err))
+			// 将附件另存为xlsx
+			go func() {
+				if err := handler.Handle(newEmail, logger); err != nil {
+					logger.Error(fmt.Sprintf("处理邮件失败(UID:%d): %v", newEmail.UID, err))
+				}
+			}()
+
+			// 附件转dataframe错误
+			bytes := newEmail.Attachments[0].Content
+			if err := dfw.ReadXLSX(bytes, "进离港航班"); err != nil {
+				logger.Error(err.Error())
 			}
-		}()
+			t2 := time.Since(t1)
+			logger.Info(fmt.Sprintf("数据处理使用时间: %v...", t2))
 
-		// 附件转dataframe错误
-		bytes := newEmail.Attachments[0].Content
-		if err := dfw.ReadXLSX(bytes, "进离港航班"); err != nil {
-			logger.Error(err.Error())
+			//
+			var pdf *processor.DelayReasons = &processor.DelayReasons{}
+
+			if err := pdf.DataProcessFunc(&dfw.df); err != nil {
+				logger.Error(err.Error())
+			}
 		}
-		t2 := time.Now().Sub(t1)
-		fmt.Println(t2)
-
 	})
 
 	if err != nil {

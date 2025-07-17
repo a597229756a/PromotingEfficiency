@@ -35,7 +35,7 @@ func (d *DataFrameWrapper) GetDF() dataframe.DataFrame {
 	return d.df
 }
 
-// GetDF 获取当前DataFrame(线程安全)
+// SetDF 获取当前DataFrame(线程安全)
 func (d *DataFrameWrapper) SetDF(df dataframe.DataFrame) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
