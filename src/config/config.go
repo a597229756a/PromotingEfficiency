@@ -32,16 +32,17 @@ type Config struct {
 }
 
 type DataConfig struct {
-	AircraftSize map[string]interface{} `json:"aircraftsize"`
-	Primary      map[string]interface{} `json:"primary"`
-	ReasonDelay  map[string]interface{} `json:"reasondelay"`
-	FlightData   map[string]interface{} `json:"flightData"`
+	AircraftSize map[string]int    `json:"aircraftsize"`
+	Primary      map[string]string `json:"primary"`
+	ReasonDelay  map[string]int    `json:"reasondelay"`
+	FlightData   map[string]string `json:"flightData"`
 }
 
 var (
 	once               sync.Once
 	instance           *Config
 	dataConfigInstance *DataConfig
+	mu                 sync.RWMutex
 )
 
 func LoadConfig(jsonFolder, jsonFile, dataJsonFile string) (*Config, *DataConfig, error) {
@@ -178,4 +179,28 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 // 用于将Duration序列化为JSON字符串
 func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(time.Duration(d).String())
+}
+
+func (dc *DataConfig) GetFlightData(colName string) string {
+	mu.RLock()
+	defer mu.RUnlock()
+	return dc.FlightData[colName]
+}
+
+func (dc *DataConfig) SetFlightData(colName, value string) {
+	mu.Lock()
+	defer mu.Unlock()
+	dc.FlightData[colName] = value
+}
+
+func (dc *DataConfig) GetReasonDelay(colName string) int {
+	mu.RLock()
+	defer mu.RUnlock()
+	return dc.ReasonDelay[colName]
+}
+
+func (dc *DataConfig) SetReasonDelay(colName string, value int) {
+	mu.Lock()
+	defer mu.Unlock()
+	dc.ReasonDelay[colName] = value
 }

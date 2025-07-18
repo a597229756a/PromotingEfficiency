@@ -2,9 +2,11 @@
 package processor
 
 import (
+	"PromotingEfficiency/src/config"
 	"PromotingEfficiency/src/utils"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,25 +15,44 @@ import (
 )
 
 type DataProcess interface {
-	DataProcessFunc(*dataframe.DataFrame) error
+	ColCalculation(data *dataframe.DataFrame) error
 }
 
 type DelayReasons struct {
-	ProcessDf *dataframe.DataFrame
-	update    bool
-	mu        sync.RWMutex
+	DtDfw   *dataframe.DataFrame
+	Dreason dataframe.DataFrame
+	Dcfg    *config.DataConfig
+	mu      sync.RWMutex
 }
 
-func (pdf *DelayReasons) SetProcessDf(df *dataframe.DataFrame) {
+func (pdf *DelayReasons) SetDreason(df dataframe.DataFrame) {
 	pdf.mu.Lock()
 	defer pdf.mu.Unlock()
-	pdf.ProcessDf = df
+	pdf.Dreason = df
 }
 
-func (pdf *DelayReasons) GetProcessDf() *dataframe.DataFrame {
+func (pdf *DelayReasons) GetDreason() dataframe.DataFrame {
 	pdf.mu.Lock()
 	defer pdf.mu.Unlock()
-	return pdf.ProcessDf
+	return pdf.Dreason
+}
+
+func (pdf *DelayReasons) SetDtDfw(df *dataframe.DataFrame) {
+	pdf.mu.Lock()
+	defer pdf.mu.Unlock()
+	pdf.DtDfw = df
+}
+
+func (pdf *DelayReasons) GetDtDfw() *dataframe.DataFrame {
+	pdf.mu.Lock()
+	defer pdf.mu.Unlock()
+	return pdf.DtDfw
+}
+
+func NewDelayReasons(dcfg *config.DataConfig) *DelayReasons {
+	return &DelayReasons{
+		Dcfg: dcfg,
+	}
 }
 
 func removeMatchingRowsOptimized(df1, df2 dataframe.DataFrame, keyCol string) dataframe.DataFrame {
@@ -113,9 +134,27 @@ func removeRows(df1, df2 dataframe.DataFrame) dataframe.DataFrame {
 	return df1
 }
 
+func (pdf *DelayReasons) ColCalculation(data *dataframe.DataFrame) error {
+	pdf.Dcfg.SetFlightData("atot-stot", "atot-stot")
+	if err := utils.SubSeriesTime(data, pdf.Dcfg.GetFlightData("atot"), pdf.Dcfg.GetFlightData("stot"), pdf.Dcfg.GetFlightData("atot-stot")); err != nil {
+		return err
+	}
+	pdf.Dcfg.SetFlightData("sobt-sibt", "sobt-sibt")
+	if err := utils.SubSeriesTime(data, pdf.Dcfg.GetFlightData("sobt"), pdf.Dcfg.GetFlightData("sibt"), pdf.Dcfg.GetFlightData("sobt-sibt")); err != nil {
+		return err
+	}
+	pdf.Dcfg.SetFlightData("atot-lastTot", "atot-lastTot")
+	if err := utils.SubSeriesTime(data, pdf.Dcfg.GetFlightData("atot"), pdf.Dcfg.GetFlightData("lastTot"), pdf.Dcfg.GetFlightData("atot-lastTot")); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // updateDelay 是主要的延误处理函数，输入输出都是 DataFrame
 func (pdf *DelayReasons) DataProcessFunc(data *dataframe.DataFrame) error {
 	cpData := data.Copy()
+
 	// 使用 defer 和 recover 捕获 panic 并记录错误日志
 	defer func() {
 		if r := recover(); r != nil {
@@ -123,24 +162,21 @@ func (pdf *DelayReasons) DataProcessFunc(data *dataframe.DataFrame) error {
 		}
 	}()
 
-	// 第一步：筛选目标行 - rstDelayReason最终判定原因 为 NA 的行
-
-	if utils.HasColumn(cpData, "三级原因") {
-		cpData = cpData.Filter(
-			dataframe.F{
-				Colname:    "三级原因",
-				Comparator: series.CompFunc,
-				Comparando: func(el series.Element) bool {
-					results := el.IsNA() || el.String() == ""
-					return results
-				}},
-		)
-	}
+	// 第一步：筛选目标行 - 三级原因 为 NA 的行
+	cpData = cpData.Filter(
+		dataframe.F{
+			Colname:    pdf.Dcfg.GetFlightData("addDelayReason"),
+			Comparator: series.CompFunc,
+			Comparando: func(el series.Element) bool {
+				results := el.IsNA() || el.String() == ""
+				return results
+			}},
+	)
 
 	// 第二步：进一步筛选 - outAtot 填充当前时间后减去 outLastTot 大于 0 的行
 	timeDiff := cpData.Filter(
 		dataframe.F{
-			Colname:    "实际起飞时间",
+			Colname:    pdf.Dcfg.GetFlightData("atot"),
 			Comparator: series.CompFunc,
 			Comparando: func(el series.Element) bool {
 				if el.IsNA() || el.String() == "" {
@@ -153,12 +189,8 @@ func (pdf *DelayReasons) DataProcessFunc(data *dataframe.DataFrame) error {
 		},
 	).Copy()
 
-	timeDiff, err := utils.SubSeriesTime(timeDiff, "实际起飞时间", "计划起飞时间", "实际起飞-计划起飞")
-	if err != nil {
-		return err
-	}
 	timeDiff = timeDiff.Filter(dataframe.F{
-		Colname:    "实际起飞-计划起飞",
+		Colname:    pdf.Dcfg.GetFlightData("atot-stot"),
 		Comparator: series.CompFunc,
 		Comparando: func(el series.Element) bool {
 			return time.Duration(el.Float()/60) > time.Duration(30)
@@ -167,33 +199,28 @@ func (pdf *DelayReasons) DataProcessFunc(data *dataframe.DataFrame) error {
 
 	// 如果没有符合条件的行，直接返回原始数据
 	if timeDiff.Nrow() == 0 {
-		pdf.SetProcessDf(data)
+		pdf.SetDtDfw(data)
 		return fmt.Errorf("如果移除后没有剩余行，直接返回 timeDiff Norw == 0")
 	}
 
 	// 第三步：移除不符合条件的行
 	// 条件：inAldt 为 NA 且 inSldt 不为 NA 且 outSobt - inSibt > 0
-
-	timeDiff, err = utils.SubSeriesTime(timeDiff, "计划撤轮挡时间", "计划上轮挡时间", "计划撤轮挡-计划上轮挡")
-	if err != nil {
-		return err
-	}
 	toRemove := timeDiff.Filter(dataframe.F{
-		Colname:    "实际落地时间",
+		Colname:    pdf.Dcfg.GetFlightData("aldt"),
 		Comparator: series.CompFunc,
 		Comparando: func(el series.Element) bool {
 			results := el.IsNA() || el.String() == ""
 			return results
 		},
 	}).Filter(dataframe.F{
-		Colname:    "计划落地时间",
+		Colname:    pdf.Dcfg.GetFlightData("sldt"),
 		Comparator: series.CompFunc,
 		Comparando: func(el series.Element) bool {
 			results := el.IsNA() || el.String() == ""
 			return results
 		},
 	}).Filter(dataframe.F{
-		Colname:    "计划撤轮挡-计划上轮挡",
+		Colname:    pdf.Dcfg.GetFlightData("sobt-sibt"),
 		Comparator: series.CompFunc,
 		Comparando: func(el series.Element) bool {
 			return time.Duration(el.Float()) > time.Duration(0)
@@ -202,105 +229,88 @@ func (pdf *DelayReasons) DataProcessFunc(data *dataframe.DataFrame) error {
 
 	// 实际移除行
 	if toRemove.Nrow() > 0 {
-		timeDiff = removeMatchingRowsOptimized(timeDiff, toRemove, "flightId")
+		timeDiff = removeMatchingRowsOptimized(timeDiff, toRemove, pdf.Dcfg.GetFlightData("flightId"))
 	}
 
 	// 如果移除后没有剩余行，直接返回
 	if timeDiff.Nrow() == 0 {
-		pdf.SetProcessDf(data)
+		pdf.SetDtDfw(data)
 		return fmt.Errorf("如果移除后没有剩余行，直接返回 timeDiff Norw == 0")
 	}
 
-	pdf.SetProcessDf(&timeDiff)
+	// 根据配置决定如何判定延误原因
+	if pdf.Dcfg.GetReasonDelay("均判定为本场天气") == 1 {
+		// 全部判定为本场天气
+		timeDiff = timeDiff.Mutate(series.New(pdf.Dcfg.Primary["01"], series.String, pdf.Dcfg.GetFlightData("addDelayReason")))
+	} else if pdf.Dcfg.ReasonDelay["均判定为本场军事活动"] == 1 {
+		// 全部判定为本场军事活动
+		timeDiff = timeDiff.Mutate(series.New(pdf.Dcfg.Primary["04"], series.String, pdf.Dcfg.GetFlightData("addDelayReason")))
+	} else {
+		// 条件1：过站时间严重不足判为公司计划
+		if pdf.Dcfg.GetReasonDelay("过站时间严重不足（前序STA晚于后序STD）判为公司计划") == 1 {
+
+			timeDiff = timeDiff.Filter(dataframe.F{
+				Colname:    pdf.Dcfg.GetFlightData("sobt-sibt"),
+				Comparator: series.CompFunc,
+				Comparando: func(el series.Element) bool {
+					return time.Duration(el.Float()) <= time.Duration(0)
+				},
+			})
+			timeDiff = timeDiff.Mutate(series.New(pdf.Dcfg.Primary["03"], series.String, pdf.Dcfg.GetFlightData("addDelayReason")))
+		}
+
+		// 条件2：根据流控类型判定为外站天气或军事活动
+		if pdf.Dcfg.GetReasonDelay("根据流控类型判定为外站天气或军事活动") == 1 {
+			filtered := timeDiff.Filter(dataframe.F{
+				Colname:    pdf.Dcfg.GetFlightData("addDelayReason"),
+				Comparator: series.CompFunc,
+				Comparando: func(el series.Element) bool {
+					return el.IsNA()
+				},
+			}).Filter(dataframe.F{
+				Colname:    pdf.Dcfg.GetFlightData("tmi"),
+				Comparator: series.CompFunc,
+				Comparando: func(el series.Element) bool {
+					return !el.IsNA()
+				},
+			})
+
+			if filtered.Ncol() > 0 {
+				for i := 0; i < filtered.Ncol(); i++ {
+					tmi := filtered.Col("tmi").Elem(i).String()
+					if strings.Contains(tmi, "天气") {
+						// 判定为外站天气
+						timeDiff.Col(pdf.Dcfg.GetFlightData("addDelayReason")).Elem(i).Set("天气")
+					} else if strings.Contains(tmi, "其他空域用户") {
+						timeDiff.Col(pdf.Dcfg.GetFlightData("addDelayReason")).Elem(i).Set("其他空域用户")
+					}
+
+				}
+			}
+		}
+		// 条件3：过站时间不足判为公司计划
+		if pdf.Dcfg.GetReasonDelay("过站时间不足（计划过站时间小于最短过站时间）判为公司计划") == 1 {
+			filtered := timeDiff.Filter(dataframe.F{
+				Colname:    pdf.Dcfg.GetFlightData("addDelayReason"),
+				Comparator: series.CompFunc,
+				Comparando: func(el series.Element) bool {
+					return el.IsNA()
+				},
+			}).Filter(dataframe.F{
+				Colname:    "ttt",
+				Comparator: series.Less,
+				Comparando: time.Duration(0),
+			})
+
+			for _, i := range filtered.Indices() {
+				for _, col := range delayReasons {
+					timeDiff = timeDiff.Set(delayType(4), series.New([]bool{i == i}, series.Bool, "idx"), col)
+				}
+			}
+		}
+	}
 	return nil
 }
-
-// func (pdf *DelayReasons) ReasonDelaySelect(data *dataframe.DataFrame, dcfg *config.DataConfig) error {
-
-// 	if err := pdf.DataProcessFunc(data); err != nil {
-// 		return err
-// 	}
-
-// 	timeDiff := pdf.ProcessDf.Copy()
-
-// 	// delayType 闭包函数，根据输入返回对应的延误原因数组
-// 	// delayType := func(x int) []string {
-// 	// 	dt := dp.delayType[x]
-// 	// 	return append(dt, dp.PRIMARY[dt[0][:2]], dt[0][5:])
-// 	// }
-
-// 	// 根据配置决定如何判定延误原因
-// 	if dcfg.ReasonDelay["均判定为本场天气"] == "1" {
-// 		// 全部判定为本场天气
-// 		timeDiff = timeDiff.Mutate(series.New(dcfg.Primary["01"], series.String, "三级原因"))
-// 	} else if dcfg.ReasonDelay["均判定为本场军事活动"] == "1" {
-// 		// 全部判定为本场军事活动
-// 		timeDiff = timeDiff.Mutate(series.New(dcfg.Primary["02"], series.String, "三级原因"))
-// 	} else {
-// 		// 条件1：过站时间严重不足判为公司计划
-// 		if dcfg.ReasonDelay["过站时间严重不足（前序STA晚于后序STD）判为公司计划"] == "1" {
-// 			index := 0
-// 			timeDiff = timeDiff.Filter(dataframe.F{
-// 				Colname:    "计划撤轮挡时间",
-// 				Comparator: series.CompFunc,
-// 				Comparando: func(el series.Element) bool {
-// 					painRemoveWheelGearTime := utils.ParseTime(el)
-// 					painUpperWheelGearTime := utils.ParseTime(timeDiff.Col("计划上轮挡时间").Elem(index))
-// 					return painRemoveWheelGearTime.Sub(painUpperWheelGearTime) <= (time.Duration(0))
-// 				},
-// 			})
-
-// 			condition := timeDiff.Col("计划撤轮挡时间").LessEq(timeDiff.Col("inSibt"))
-// 			for _, col := range delayReasons {
-// 				timeDiff = timeDiff.Set(delayType(4), condition, col)
-// 			}
-// 		}
-
-// 		// 条件2：根据流控类型判定为外站天气或军事活动
-// 		if dcfg.ReasonDelay["根据流控类型判定为外站天气或军事活动"] == "1" {
-// 			filtered := timeDiff.Filter(dataframe.F{
-// 				Colname:    "rstDelayReason",
-// 				Comparator: series.IsNA,
-// 			}).Filter(dataframe.F{
-// 				Colname:    "outTmi",
-// 				Comparator: series.NotIsNA,
-// 			})
-
-// 			for _, i := range filtered.Indices() {
-// 				outTmi := filtered.Col("outTmi").Elem(i).String()
-// 				if strings.Contains(outTmi, "天气") {
-// 					// 判定为外站天气
-// 					for _, col := range delayReasons {
-// 						timeDiff = timeDiff.Set(delayType(2), series.New([]bool{i == i}, series.Bool, "idx"), col)
-// 					}
-// 				} else if strings.Contains(outTmi, "其他空域用户") {
-// 					// 判定为外站军事活动
-// 					for _, col := range delayReasons {
-// 						timeDiff = timeDiff.Set(delayType(3), series.New([]bool{i == i}, series.Bool, "idx"), col)
-// 					}
-// 				}
-// 			}
-// 		}
-// 	}
-// }
-
-// 	// 条件3：过站时间不足判为公司计划
-// 	if dp.DELAYBY["过站时间不足（计划过站时间小于最短过站时间）判为公司计划"] {
-// 		filtered := timeDiff.Filter(dataframe.F{
-// 			Colname:    "rstDelayReason",
-// 			Comparator: series.IsNA,
-// 		}).Filter(dataframe.F{
-// 			Colname:    "ttt",
-// 			Comparator: series.Less,
-// 			Comparando: time.Duration(0),
-// 		})
-
-// 		for _, i := range filtered.Indices() {
-// 			for _, col := range delayReasons {
-// 				timeDiff = timeDiff.Set(delayType(4), series.New([]bool{i == i}, series.Bool, "idx"), col)
-// 			}
-// 		}
-// 	}
 
 // 	// 剩余延误原因的判定选项
 // 	remainingOptions := []string{

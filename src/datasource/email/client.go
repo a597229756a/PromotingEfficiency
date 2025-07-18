@@ -4,6 +4,7 @@ package email
 import (
 	// 标准库导入
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -31,9 +32,10 @@ import (
 
 /******************** 常量定义 ********************/
 const (
-	MaxFetchMessages   = 100            // 单次最大获取邮件数量，防止内存溢出
-	FetchBufferSize    = 10             // 邮件获取通道缓冲区大小
-	RecentMailDuration = 24 * time.Hour // 判定为"新邮件"的时间范围
+	MaxFetchMessages   = 100              // 单次最大获取邮件数量，防止内存溢出
+	FetchBufferSize    = 10               // 邮件获取通道缓冲区大小
+	RecentMailDuration = 10 * time.Minute // 判定为"新邮件"的时间范围
+	DeleteMailDuration = 1 * time.Hour    // 超过1小时的邮件删除
 )
 
 /******************** 接口定义 ********************/
@@ -50,6 +52,9 @@ type MailService interface {
 	// FetchUnreadEmails 获取未读邮件列表
 	// 返回: 邮件列表，错误信息
 	FetchUnreadEmails() ([]*Email, error)
+
+	// 定期删除邮件
+	DeleteOldEmails() error
 }
 
 // EmailHandler 邮件处理器接口
@@ -236,6 +241,58 @@ func (s *EmailClient) FetchUnreadEmails() ([]*Email, error) {
 	return s.fetchMessages(ids)
 }
 
+// DeleteOldEmails 删除超过指定时间的邮件(线程安全)
+// 实现逻辑:
+// 1. 检查连接状态
+// 2. 选择INBOX邮箱
+// 3. 设置搜索条件(超过1小时)
+// 4. 执行搜索并删除符合条件的邮件
+func (s *EmailClient) DeleteOldEmails() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.connected {
+		return fmt.Errorf("未连接到邮件服务器")
+	}
+
+	// 选择收件箱
+	if _, err := s.client.Select("INBOX", false); err != nil {
+		return fmt.Errorf("选择邮箱失败: %w", err)
+	}
+
+	// 构建搜索条件 - 查找超过指定时间的邮件
+	criteria := imap.NewSearchCriteria()
+	criteria.Before = time.Now().Add(-DeleteMailDuration)
+
+	// 执行搜索
+	ids, err := s.client.Search(criteria)
+	if err != nil {
+		return fmt.Errorf("搜索邮件失败: %w", err)
+	}
+
+	// 空结果处理
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// 设置删除标记
+	seqSet := new(imap.SeqSet)
+	seqSet.AddNum(ids...)
+
+	item := imap.FormatFlagsOp(imap.AddFlags, true)
+	flags := []interface{}{imap.DeletedFlag}
+	if err := s.client.Store(seqSet, item, flags, nil); err != nil {
+		return fmt.Errorf("标记删除失败: %w", err)
+	}
+
+	// 执行删除
+	if err := s.client.Expunge(nil); err != nil {
+		return fmt.Errorf("执行删除失败: %w", err)
+	}
+
+	return nil
+}
+
 // fetchMessages 获取指定ID的邮件内容
 // 参数:
 //   - ids: 邮件ID序列
@@ -406,36 +463,53 @@ func charsetReader(charset string, input io.Reader) (io.Reader, error) {
 //   - logger: 日志记录器
 //
 // 返回: 处理过程中的错误
-func CheckAndProcessEmails(mailService MailService, logger *storage.Logger) (email *Email, err error) {
-	startTime := time.Now()
+func CheckAndProcessEmails(ctx context.Context, mailService MailService, handler *XLSXAttachmentHandler, logger *storage.Logger) (email *Email, err error) {
 	logger.Info("开始检查邮箱...")
+	startTime := time.Now()
+	var emails = make(chan []*Email)
 
 	// 建立连接
 	if err := mailService.Connect(); err != nil {
 		return email, fmt.Errorf("连接失败: %w", err)
 	}
+
 	defer mailService.Disconnect() // 确保连接关闭
 
-	// 获取未读邮件
-	emails, err := mailService.FetchUnreadEmails()
-	if err != nil {
-		return email, fmt.Errorf("获取邮件失败: %w", err)
-	}
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	go func() {
+		// 删除邮件在1小时以上的航班邮件
+		if err := mailService.DeleteOldEmails(); err != nil {
+			logger.Error(fmt.Sprintf("未删除1小时以上的航班: %v", err))
+		}
+	}()
+
+	go func() {
+		defer close(emails)
+		// 获取未读邮件
+		ems, err := mailService.FetchUnreadEmails()
+		if err != nil {
+			logger.Error(fmt.Sprintf("获取未读邮件: %v", err))
+		}
+		emails <- ems
+
+	}()
+	ems := <-emails
+	logger.Info(fmt.Sprintf("获取未读邮件: %v", time.Since(startTime)))
 
 	// 空结果处理
-	if len(emails) == 0 {
-		logger.Info("没有新邮件")
-		return email, err
+	if len(ems) == 0 {
+		return email, fmt.Errorf("没有新邮件")
 	}
-
 	// 过滤目标邮件
-	targetEmail := filterLatestTargetEmail(emails, "兴效能")
+	targetEmail := filterLatestTargetEmail(ems, "兴效能")
 	if targetEmail == nil {
-		logger.Info("没有目标邮件")
-		return email, err
+		return email, fmt.Errorf("没有目标邮件")
 	}
 
-	logger.Info(fmt.Sprintf("处理完成，耗时: %v", time.Since(startTime)))
+	logger.Info(fmt.Sprintf("初始化数据，耗时: %v", time.Since(startTime)))
+
 	return targetEmail, nil
 }
 

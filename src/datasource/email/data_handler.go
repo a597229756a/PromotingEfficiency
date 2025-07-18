@@ -5,7 +5,6 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -166,21 +165,83 @@ func (d *DataFrameWrapper) addFlightIndex() {
 	d.SetDF(df)
 }
 
+// 并行处理数据
+// func (d *DataFrameWrapper) ProcessData() error {
+// 	df := d.df
+
+// 	// 1. 去除完全空的行
+// 	df = df.Filter(
+// 		dataframe.F{Colname: df.Names()[0], Comparator: series.Neq, Comparando: ""},
+// 	)
+
+// 	// 2. 标准化时间字段 - 使用worker pool
+// 	timeCols := d.findTimeColumns()
+// 	numWorkers := runtime.NumCPU() // 根据CPU核心数设置worker数量
+
+// 	type job struct {
+// 		col  string
+// 		data series.Series
+// 	}
+
+// 	type result struct {
+// 		col    string
+// 		series series.Series
+// 	}
+
+// 	jobs := make(chan job, len(timeCols))
+// 	results := make(chan result, len(timeCols))
+
+// 	// 启动worker
+// 	var wg sync.WaitGroup
+// 	for i := 0; i < numWorkers; i++ {
+// 		wg.Add(1)
+// 		go func() {
+// 			defer wg.Done()
+// 			for j := range jobs {
+// 				s := series.New(j.data.Map(excelToTime), series.Int, j.col)
+// 				results <- result{j.col, s}
+// 			}
+// 		}()
+// 	}
+
+// 	// 发送任务
+// 	for _, col := range timeCols {
+// 		jobs <- job{col, df.Col(col)}
+// 	}
+// 	close(jobs)
+
+// 	// 等待所有worker完成
+// 	go func() {
+// 		wg.Wait()
+// 		close(results)
+// 	}()
+
+// 	// 收集结果
+// 	for res := range results {
+// 		df = df.Mutate(res.series)
+// 	}
+
+// 	d.SaveToExcel("test.xlsx")
+// 	d.SetDF(df)
+
+// 	return nil
+// }
+
 // ProcessData 处理DataFrame数据
 func (d *DataFrameWrapper) ProcessData() error {
 	df := d.df
 
 	// 1. 去除完全空的行
-	// df = dfPtr.Filter(
-	// 	dataframe.F{Colname: dfPtr.Names()[0], Comparator: series.Neq, Comparando: ""},
-	// )
+	df = df.Filter(
+		dataframe.F{Colname: df.Names()[0], Comparator: series.Neq, Comparando: ""},
+	)
 
 	// 2. 标准化时间字段
 	timeCols := d.findTimeColumns()
 
 	for _, col := range timeCols {
 		df = df.Mutate(
-			series.New(df.Col(col).Map(excelToTime), series.String, col),
+			series.New(df.Col(col).Map(excelToTime), series.Int, col),
 		)
 	}
 
@@ -231,11 +292,14 @@ func excelToTime(v series.Element) series.Element {
 		Add(time.Duration(86400*fraction*1e9) * time.Nanosecond)
 
 	// 5. 保留原始时间值并设置格式化字符串
-	res := result.Format("2006-01-02 15:04:05")
+	// res := result.Format("2006-01-02 15:04:05")
 
-	resVO := reflect.ValueOf(res)
-	v.Set(resVO.Interface())
+	// resVO := reflect.ValueOf(res)
+	// v.Set(resVO.Interface())
 
+	// 5. 转换为Unix时间戳（秒）
+	timestamp := result.UnixNano()
+	v.Set(timestamp)
 	return v
 }
 

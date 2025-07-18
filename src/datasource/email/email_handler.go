@@ -45,10 +45,6 @@ func (h *XLSXAttachmentHandler) markAsProcessed(uid uint32) {
 
 // Handle 处理单个邮件
 func (h *XLSXAttachmentHandler) Handle(email *Email, logger *storage.Logger) error {
-	// 检查是否已处理过该邮件
-	if h.isProcessed(email.UID) {
-		return nil
-	}
 
 	// 检查邮件主题是否包含目标关键词
 	if !strings.Contains(email.Subject, h.TargetSubject) {

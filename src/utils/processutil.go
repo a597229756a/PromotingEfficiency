@@ -39,36 +39,45 @@ func ParseTime(s series.Element) (time.Time, error) {
 	return t, err
 }
 
-func SubSeriesTime(df dataframe.DataFrame, colName1, colName2, colName3 string) (dataframe.DataFrame, error) {
-
-	// 获取两列的所有元素
-	col1 := df.Col(colName1)
-	col2 := df.Col(colName2)
-
-	// 预分配切片容量
-	durations := make([]float64, 0, df.Nrow())
-
-	// 遍历每一行计算时间差
-	for i := 0; i < df.Nrow(); i++ {
-		startTime, err := ParseTime(col1.Elem(i))
-		if err != nil {
-			return df, fmt.Errorf("failed to parse start time at row %d: %v", i, err)
-		}
-
-		endTime, err := ParseTime(col2.Elem(i))
-		if err != nil {
-			return df, fmt.Errorf("failed to parse end time at row %d: %v", i, err)
-		}
-
-		duration := startTime.Sub(endTime).Seconds()
-		durations = append(durations, duration)
+func SubSeriesTime(df *dataframe.DataFrame, colName1, colName2, colName3 string) error {
+	// 1. 校验输入列是否存在
+	if !HasColumn(*df, colName1) || !HasColumn(*df, colName2) {
+		return fmt.Errorf("列 %s 或 %s 不存在", colName1, colName2)
 	}
 
-	// 创建时间差列并添加到DataFrame
-	durationCol := series.New(durations, series.Float, colName3)
+	// 2. 提前获取列和行数，避免重复计算
+	col1, col2 := df.Col(colName1), df.Col(colName2)
+	rowCount := df.Nrow()
+	durations := make([]float64, rowCount) // 预分配精确大小
 
-	// 使用指针更新DataFrame
-	return df.CBind(dataframe.New(durationCol)), nil
+	// 3. 遍历计算时间差（秒）
+	for i := 0; i < rowCount; i++ {
+		startTime, err := ParseTime(col1.Elem(i))
+		if err != nil {
+			return fmt.Errorf("第 %d 行解析开始时间失败: %v", i, err)
+		}
+		endTime, err := ParseTime(col2.Elem(i))
+		if err != nil {
+			return fmt.Errorf("第 %d 行解析结束时间失败: %v", i, err)
+		}
+		durations[i] = startTime.Sub(endTime).Seconds()
+	}
+
+	// 4. 直接使用 series.New 创建新列并添加
+	durationSeries := series.New(durations, series.Float, colName3)
+	df.CBind(dataframe.New(durationSeries))
+
+	return nil
+}
+
+func NewSeries[T1 comparable](colName string, value T1, seriesType series.Type, nrow int) (series.Series, error) {
+
+	durations := make([]T1, nrow)
+	for i := 0; i < nrow; i++ {
+		durations[i] = value
+	}
+	durationSeries := series.New(durations, seriesType, colName)
+	return durationSeries, nil
 }
 
 func SaveToExcel(df dataframe.DataFrame, filePath string) error {
