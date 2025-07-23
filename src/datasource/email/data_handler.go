@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/go-gota/gota/dataframe"
 	"github.com/go-gota/gota/series"
 	"github.com/tealeg/xlsx"
+	"github.com/tobgu/qframe"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -23,8 +25,173 @@ const (
 
 // DataFrameWrapper 封装DataFrame并提供线程安全访问
 type DataFrameWrapper struct {
+	qf qframe.QFrame
 	df dataframe.DataFrame // 存储DataFrame数据
 	mu sync.RWMutex        // 读写锁保证线程安全
+}
+
+// GetQFrame 获取当前DataFrame(线程安全)
+func (d *DataFrameWrapper) GetQFrame() qframe.QFrame {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.qf
+}
+
+// SetQFrame 获取当前DataFrame(线程安全)
+func (d *DataFrameWrapper) SetQFrame(qf qframe.QFrame) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.qf = qf
+}
+
+func ReadXlsx(data []byte, sheetName string) (dfw *DataFrameWrapper, err error) {
+	dfw = &DataFrameWrapper{}
+	// 1. 使用tealeg/xlsx打开Excel文件
+	xlFile, err := xlsx.OpenBinary(data)
+	if err != nil {
+		return dfw, err
+	}
+
+	// 2. 获取第一个工作表
+	if len(xlFile.Sheets) == 0 {
+		return dfw, fmt.Errorf("excel文件中没有工作表: %w", err)
+	}
+	sheet := xlFile.Sheet[sheetName]
+
+	// 3. 转换为Gota DataFrame
+	if err := dfw.convertSheetToQFrame(sheet); err != nil {
+		return dfw, fmt.Errorf("转换为dataframe失败")
+	}
+
+	// 4. 初始化id
+	dfw.addIndexForQFrame()
+
+	// 5. 格式化数据
+	dfw.ProcessQFrame()
+
+	return dfw, nil
+}
+
+// convertSheetToDataFrame 将xlsx.Sheet转换为dataframe.DataFrame
+func (dfw *DataFrameWrapper) convertSheetToQFrame(sheet *xlsx.Sheet) error {
+	if len(sheet.Rows) == 0 {
+		return fmt.Errorf("sheet rows wei 0")
+	}
+
+	// 获取列名(假设第二行是标题行)
+	var headers []string
+	for _, cell := range sheet.Rows[1].Cells {
+		headers = append(headers, cell.String())
+	}
+
+	// 准备数据列
+	columns := make([][]string, len(headers))
+	for i := range columns {
+		columns[i] = make([]string, 0, len(sheet.Rows)-1)
+	}
+
+	// 填充数据(从第三行开始)
+	for _, row := range sheet.Rows[2:] {
+		for i, cell := range row.Cells {
+			if i < len(headers) { // 确保不超出列数范围
+				columns[i] = append(columns[i], cell.String())
+			}
+		}
+	}
+
+	// 创建Series切片
+	seriesList := make(map[string]interface{}, len(headers))
+	for i, colName := range headers {
+		// 自动推断类型创建Series
+
+		seriesList[colName] = columns[i]
+	}
+
+	dfw.SetQFrame(qframe.New(seriesList))
+
+	return nil
+}
+
+func (dfw *DataFrameWrapper) addIndexForQFrame() {
+	qf := dfw.qf
+
+	// 1. 拼接航班号 + 计划时间
+	qf = qf.Apply(qframe.Instruction{
+		Fn: func(a, b *string) *string {
+			hash := md5.Sum([]byte(*a + *b))
+			p := hex.EncodeToString(hash[:])
+			return &p
+		},
+		DstCol:  "ID",
+		SrcCol1: "离港航班号",
+		SrcCol2: "计划撤轮挡时间",
+	})
+
+	dfw.SetQFrame(qf)
+}
+
+// ProcessData 处理DataFrame数据
+func (dfw *DataFrameWrapper) ProcessQFrame() error {
+	qf := dfw.qf
+
+	// 2. 将xlsx时间转为时间辍
+	timeCols := dfw.timeColumns()
+
+	for _, colName := range timeCols {
+		qf = qf.Apply(
+			qframe.Instruction{
+				Fn: func(s *string) int {
+					f := xlsxToTime(*s)
+					return int(f)
+				},
+				DstCol:  colName,
+				SrcCol1: colName,
+			},
+		)
+	}
+	// 更新处理后的数据
+	dfw.SetQFrame(qf)
+
+	return nil
+}
+
+// excel时间类型转time.Time类型
+func xlsxToTime(v string) int64 {
+	re := regexp.MustCompile(Number)
+
+	// 1. 错误处理：检查元素是否为数值类型
+	if !isMatchGood(re, v) {
+		return 0.0 // 返回原值或可设置为错误标记
+	}
+
+	// 2. 处理Excel的1900年闰年错误（2月29日不存在）
+	excelDays, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		fmt.Println(err)
+	}
+	if excelDays >= 60 {
+		excelDays -= 1 // 调整60天后的日期
+	}
+
+	// 3. 优化时间计算（减少临时变量）
+	base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+	days := int(excelDays)
+	fraction := excelDays - float64(days)
+
+	// 4. 更精确的时间计算（包含纳秒）
+	result := base.AddDate(0, 0, days).
+		Add(time.Duration(86400*fraction*1e9) * time.Nanosecond)
+
+	// 5. 保留原始时间值并设置格式化字符串
+	// res := result.Format("2006-01-02 15:04:05")
+
+	// resVO := reflect.ValueOf(res)
+	// v.Set(resVO.Interface())
+
+	// 5. 转换为Unix时间戳（秒）
+	timestamp := result.UnixNano()
+
+	return timestamp
 }
 
 // GetDF 获取当前DataFrame(线程安全)
@@ -42,23 +209,23 @@ func (d *DataFrameWrapper) SetDF(df dataframe.DataFrame) {
 }
 
 // LoadXLSX 从XLSX数据加载到DataFrameZ
-func (d *DataFrameWrapper) ReadXLSX(data []byte, sheetName string) error {
-
+func LoadXLSX(data []byte, sheetName string) (d *DataFrameWrapper, err error) {
+	d = &DataFrameWrapper{}
 	// 1. 使用tealeg/xlsx打开Excel文件
 	xlFile, err := xlsx.OpenBinary(data)
 	if err != nil {
-		return err
+		return d, err
 	}
 
 	// 2. 获取第一个工作表
 	if len(xlFile.Sheets) == 0 {
-		return fmt.Errorf("excel文件中没有工作表: %w", err)
+		return d, fmt.Errorf("excel文件中没有工作表: %w", err)
 	}
 	sheet := xlFile.Sheet[sheetName]
 
 	// 3. 转换为Gota DataFrame
 	if err := d.convertSheetToDataFrame(sheet); err != nil {
-		return fmt.Errorf("转换为dataframe失败")
+		return d, fmt.Errorf("转换为dataframe失败")
 	}
 
 	// 4. 初始化id
@@ -67,7 +234,7 @@ func (d *DataFrameWrapper) ReadXLSX(data []byte, sheetName string) error {
 	// 5. 格式化数据
 	d.ProcessData()
 
-	return err
+	return d, nil
 }
 
 // convertSheetToDataFrame 将xlsx.Sheet转换为dataframe.DataFrame
@@ -249,6 +416,22 @@ func (d *DataFrameWrapper) ProcessData() error {
 	d.SetDF(df)
 
 	return nil
+}
+
+// 辅助函数：查找可能是时间类型的列
+func (dfw *DataFrameWrapper) timeColumns() []string {
+	var timeCols []string
+	timeKeywords := []string{"时间", "日期", "date", "time", "COBT"}
+
+	for _, col := range dfw.qf.ColumnNames() {
+		for _, kw := range timeKeywords {
+			if strings.Contains(col, kw) {
+				timeCols = append(timeCols, col)
+				break
+			}
+		}
+	}
+	return timeCols
 }
 
 // 辅助函数：查找可能是时间类型的列

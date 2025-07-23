@@ -32,7 +32,7 @@ import (
 
 /******************** 常量定义 ********************/
 const (
-	MaxFetchMessages   = 100              // 单次最大获取邮件数量，防止内存溢出
+	FetchMessages      = 1                // 只获取1封
 	FetchBufferSize    = 10               // 邮件获取通道缓冲区大小
 	RecentMailDuration = 10 * time.Minute // 判定为"新邮件"的时间范围
 	DeleteMailDuration = 1 * time.Hour    // 超过1小时的邮件删除
@@ -220,7 +220,7 @@ func (s *EmailClient) FetchUnreadEmails() ([]*Email, error) {
 	// 构建搜索条件
 	criteria := imap.NewSearchCriteria()
 	criteria.WithoutFlags = []string{imap.SeenFlag}
-	criteria.Since = time.Now().Add(-RecentMailDuration)
+	// criteria.Since = time.Now().UTC().Add(-RecentMailDuration)
 
 	// 执行搜索
 	ids, err := s.client.Search(criteria)
@@ -233,11 +233,20 @@ func (s *EmailClient) FetchUnreadEmails() ([]*Email, error) {
 		return nil, nil
 	}
 
-	// 限制获取数量
-	if len(ids) > MaxFetchMessages {
-		ids = ids[:MaxFetchMessages]
+	// 按时间降序排序（确保最新邮件在前）
+	sort.Slice(ids, func(i, j int) bool {
+		return ids[i] > ids[j] // 假设ID越大代表邮件越新
+	})
+
+	// 只取最新的1封邮件（或自定义数量）
+	if len(ids) > FetchMessages {
+		ids = ids[:FetchMessages]
 	}
 
+	// // 限制获取数量
+	// if len(ids) > MaxFetchMessages {
+	// 	ids = ids[:MaxFetchMessages]
+	// }
 	return s.fetchMessages(ids)
 }
 
@@ -250,6 +259,13 @@ func (s *EmailClient) FetchUnreadEmails() ([]*Email, error) {
 func (s *EmailClient) DeleteOldEmails() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 建立连接
+	if err := s.Connect(); err != nil {
+		return fmt.Errorf("连接失败: %w", err)
+	}
+
+	defer s.Disconnect() // 确保连接关闭
 
 	if !s.connected {
 		return fmt.Errorf("未连接到邮件服务器")
@@ -373,7 +389,7 @@ func (s *EmailClient) parseEmail(msg *imap.Message, section *imap.BodySectionNam
 
 	// 解析邮件各部分
 	if err := s.parseEmailParts(mr, email); err != nil {
-		return nil, err
+		return email, err
 	}
 
 	return email, nil
@@ -390,13 +406,19 @@ func (s *EmailClient) parseEmailParts(mr *mail.Reader, email *Email) error {
 			break
 		}
 		if err != nil {
-			continue // 跳过解析失败的部分
+			// 记录错误并继续（或根据需求返回错误）
+			log.Printf("警告：跳过邮件部分，解析错误: %v", err)
+			continue
 		}
 
-		// 处理附件部分
+		// 处理附件
 		if h, ok := p.Header.(*mail.AttachmentHeader); ok {
+			if p.Body == nil {
+				log.Printf("警告：附件 '%v' 内容为空", h)
+				continue
+			}
 			if err := s.parseAttachment(h, p.Body, email); err != nil {
-				log.Printf("解析附件失败: %v", err)
+				return fmt.Errorf("解析附件失败: %v", err)
 			}
 		}
 	}
@@ -423,6 +445,7 @@ func (s *EmailClient) parseAttachment(h *mail.AttachmentHeader, body io.Reader, 
 		Filename: decodeHeader(filename),
 		Content:  buf.Bytes(),
 	})
+
 	return nil
 }
 
@@ -466,7 +489,6 @@ func charsetReader(charset string, input io.Reader) (io.Reader, error) {
 func CheckAndProcessEmails(ctx context.Context, mailService MailService, handler *XLSXAttachmentHandler, logger *storage.Logger) (email *Email, err error) {
 	logger.Info("开始检查邮箱...")
 	startTime := time.Now()
-	var emails = make(chan []*Email)
 
 	// 建立连接
 	if err := mailService.Connect(); err != nil {
@@ -475,27 +497,12 @@ func CheckAndProcessEmails(ctx context.Context, mailService MailService, handler
 
 	defer mailService.Disconnect() // 确保连接关闭
 
-	var wg sync.WaitGroup
+	// 获取未读邮件
+	ems, err := mailService.FetchUnreadEmails()
+	if err != nil {
+		logger.Error(fmt.Sprintf("获取未读邮件: %v", err))
+	}
 
-	wg.Add(2)
-	go func() {
-		// 删除邮件在1小时以上的航班邮件
-		if err := mailService.DeleteOldEmails(); err != nil {
-			logger.Error(fmt.Sprintf("未删除1小时以上的航班: %v", err))
-		}
-	}()
-
-	go func() {
-		defer close(emails)
-		// 获取未读邮件
-		ems, err := mailService.FetchUnreadEmails()
-		if err != nil {
-			logger.Error(fmt.Sprintf("获取未读邮件: %v", err))
-		}
-		emails <- ems
-
-	}()
-	ems := <-emails
 	logger.Info(fmt.Sprintf("获取未读邮件: %v", time.Since(startTime)))
 
 	// 空结果处理

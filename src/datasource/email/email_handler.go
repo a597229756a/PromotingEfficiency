@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ====================== 邮件处理器实现 ======================
@@ -30,7 +31,7 @@ func NewXLSXAttachmentHandler(subject, dataDir string) *XLSXAttachmentHandler {
 }
 
 // isProcessed 检查邮件是否已处理过（线程安全）
-func (h *XLSXAttachmentHandler) isProcessed(uid uint32) bool {
+func (h *XLSXAttachmentHandler) IsProcessed(uid uint32) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.processedUIDs[uid]
@@ -69,7 +70,8 @@ func (h *XLSXAttachmentHandler) Handle(email *Email, logger *storage.Logger) err
 			logger.Info(fmt.Sprintf("找到XLSX附件:%v", attachment.Filename))
 
 			// 构建完整文件路径
-			filePath := filepath.Join(h.DataDir, attachment.Filename)
+			fileName := h.TargetSubject + time.Now().Format("200601021504") + ".xlsx"
+			filePath := filepath.Join(h.DataDir, fileName)
 
 			// 保存文件
 			if err := os.WriteFile(filePath, attachment.Content, 0644); err != nil {

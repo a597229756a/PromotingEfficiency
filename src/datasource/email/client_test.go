@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,7 +37,6 @@ func TestNewEmailClient(t *testing.T) {
 	if err != nil {
 		log.Fatal("Failed to initialize logger:", err)
 	}
-	fmt.Println(dcfg)
 
 	// 初始化日志系统
 	logger, err := storage.NewLogger("app.log")
@@ -52,41 +53,18 @@ func TestNewEmailClient(t *testing.T) {
 	// 连接到邮箱
 	handler := NewXLSXAttachmentHandler(cfg.Email.TargetSubject, cfg.DataDir)
 
-	var dfw *DataFrameWrapper = &DataFrameWrapper{}
 	// 设置定时任务
 	c := cron.New()
 
 	// 使用配置中的检查间隔而不是硬编码的1分钟
 	interval := time.Duration(cfg.Email.CheckInterval).String() // 例如 "5m0s"
 	cronSpec := fmt.Sprintf("@every %s", interval)
-		
+
 	// 添加定时任务
 	err = c.AddFunc(cronSpec, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Email.CheckInterval))
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Duration(cfg.Email.CheckInterval))
 		defer cancel()
-
-		logger.Info(fmt.Sprintf("开始定时检查(间隔: %v)...", cronSpec))
-
-		// 查询email是否有更新
-		newEmail, err := CheckAndProcessEmails(ctx, emailClient, handler, logger)
-
-		if err != nil {
-			logger.Error("检查处理邮件失败: " + err.Error()) // 使用Error级别记录错误
-		} else if !handler.isProcessed(newEmail.UID) { // 如果邮件没有处理过
-
-			t1 := time.Now()
-			// 处理数据
-			bytes := newEmail.Attachments[0].Content
-			if err := dfw.ReadXLSX(bytes, "进离港航班"); err != nil {
-				logger.Error(err.Error())
-			}
-
-			worker(ctx, handler, newEmail, logger, dfw)
-			t2 := time.Since(t1)
-			logger.Info(fmt.Sprintf("数据处理使用时间: %v...", t2))
-
-		}
-
+		run(ctx, emailClient, handler, logger, cronSpec, dcfg, cfg)
 	})
 
 	if err != nil {
@@ -103,7 +81,39 @@ func TestNewEmailClient(t *testing.T) {
 
 }
 
-func worker(ctx context.Context, handler *XLSXAttachmentHandler, newEmail *Email, logger *storage.Logger, dfw *DataFrameWrapper) {
+func run(ctx context.Context, emailClient MailService, handler *XLSXAttachmentHandler, logger *storage.Logger, cronSpec string, dcfg *config.DataConfig, cfg *config.Config) {
+	select {
+	case <-ctx.Done():
+		if err := emailClient.DeleteOldEmails(); err != nil {
+			logger.Error(fmt.Sprintf("删除多余邮件失败:%v", err.Error()))
+		}
+	default:
+
+		logger.Info(fmt.Sprintf("开始定时检查(间隔: %v)...", cronSpec))
+
+		// 查询email是否有更新
+		newEmail, err := CheckAndProcessEmails(ctx, emailClient, handler, logger)
+
+		if err != nil {
+			logger.Error("检查处理邮件失败: " + err.Error()) // 使用Error级别记录错误
+		} else if !handler.IsProcessed(newEmail.UID) && len(newEmail.Attachments) > 0 { // 如果邮件没有处理过
+			t1 := time.Now()
+
+			// 处理数据
+			bytes := newEmail.Attachments[0].Content
+			dfw, err := ReadXlsx(bytes, cfg.SheetName)
+			if err != nil {
+				logger.Error(err.Error())
+			}
+
+			worker(ctx, handler, newEmail, logger, dfw, dcfg, cfg)
+			t2 := time.Since(t1)
+			logger.Info(fmt.Sprintf("数据处理使用时间: %v...", t2))
+		}
+	}
+}
+
+func worker(ctx context.Context, handler *XLSXAttachmentHandler, newEmail *Email, logger *storage.Logger, dfw *DataFrameWrapper, dcfg *config.DataConfig, cfg *config.Config) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -114,16 +124,18 @@ func worker(ctx context.Context, handler *XLSXAttachmentHandler, newEmail *Email
 	}()
 	go func() {
 		defer wg.Done()
+		csvPath := strings.Join([]string{cfg.SheetName, "csv"}, ".")
+		csvFile, err := os.OpenFile(csvPath, os.O_WRONLY|os.O_CREATE, 0666)
+		if err != nil {
+			logger.Error(fmt.Sprintf("文件写入错误：%v", err))
+		}
+
+		dfw.qf.ToCSV(csvFile)
 		// pdf := processor.NewDelayReasons(dcfg)
 		// if err := pdf.DataProcessFunc(&dfw.df); err != nil {
 		// 	logger.Error(err.Error())
 		// }
 	}()
 
-	// select {
-	// case <-ctx.Done():
-	// 	fmt.Printf("Worker exiting (context cancelled)\n")
-	// 	return
-	// }
 	wg.Wait()
 }

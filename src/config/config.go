@@ -20,6 +20,7 @@ type Config struct {
 	} `json:"email"`
 
 	DataDir    string `json:"data_dir"` // 应用程序数据存储目录
+	SheetName  string `json:"sheet_name"`
 	LogName    string `json:"log_name"`
 	LogMaxSize string `json:"log_max_size"`
 	SendEmail  struct {
